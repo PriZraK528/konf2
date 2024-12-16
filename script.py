@@ -3,33 +3,95 @@ import os
 import sys
 import argparse
 from tempfile import NamedTemporaryFile
-
+import zlib
+import os
 
 def get_git_dependencies(repo_path):
-    """Извлекает зависимости из коммитов в указанном Git-репозитории."""
-    try:
-        output = subprocess.check_output(
-            ["git", "-C", repo_path, "log", "--pretty=format:%H", "--name-only"],
-            text=True
-        )
-    except subprocess.CalledProcessError as e:
-        print(f"Ошибка при выполнении git: {e}", file=sys.stderr)
-        sys.exit(1)
+    """
+    Извлекает зависимости из коммитов в Git-репозитории, анализируя файлы в .git/objects.
+    """
+    git_dir = os.path.join(repo_path, ".git")
+    objects_dir = os.path.join(git_dir, "objects")
+
+    if not os.path.isdir(objects_dir):
+        raise ValueError("Указанный путь не является Git-репозиторием.")
+
+    def read_object(obj_path):
+        """Считывает и декодирует содержимое объекта Git."""
+        with open(obj_path, "rb") as f:
+            compressed_data = f.read()
+        return zlib.decompress(compressed_data)
+
+    def parse_commit(commit_data):
+        """Парсит объект commit и извлекает SHA-1 дерева."""
+        try:
+            # Разделяем данные на заголовок и содержимое
+            _, body = commit_data.split(b'\x00', 1)
+
+            # Перебираем строки тела
+            for line in body.split(b'\n'):
+                if line.startswith(b"tree "):
+                    # Возвращаем SHA дерева
+                    return line.split(b" ")[1].decode()
+
+            # Если строка tree отсутствует
+            print(f"Ошибка: объект commit не содержит строки tree. Данные: {commit_data}")
+        except Exception as e:
+            print(f"Ошибка при разборе объекта commit: {e}. Данные: {commit_data}", file=sys.stderr)
+        return None
+
+    def parse_tree(tree_data):
+        """Парсит объект tree и извлекает файлы."""
+        files = []
+        idx = 0
+        while idx < len(tree_data):
+            space_idx = tree_data.index(b" ", idx)
+            null_idx = tree_data.index(b"\x00", space_idx)
+            file_name = tree_data[space_idx + 1:null_idx].decode()
+            files.append(file_name)
+            idx = null_idx + 21
+        return files
 
     dependencies = {}
-    current_commit = None
-    for line in output.splitlines():
-        if line.strip() == "":
-            current_commit = None
+    for obj_dir in os.listdir(objects_dir):
+        if len(obj_dir) != 2:  # Объекты хранятся в каталогах с двухсимвольными названиями
             continue
 
-        if not current_commit:
-            current_commit = line.strip()
-            dependencies[current_commit] = []
-        else:
-            dependencies[current_commit].append(line.strip())
-    
+        obj_dir_path = os.path.join(objects_dir, obj_dir)
+        if not os.path.isdir(obj_dir_path):
+            continue
+
+        for obj_file in os.listdir(obj_dir_path):
+            obj_path = os.path.join(obj_dir_path, obj_file)
+            full_hash = f"{obj_dir}{obj_file}"
+            obj_data = read_object(obj_path)
+
+            if obj_data.startswith(b"commit "):
+                # Извлекаем дерево коммита
+                tree_sha = parse_commit(obj_data)
+                # Пример логирования, если дерево не найдено
+                if not tree_sha:
+                    print(f"Пропуск коммита {full_hash}: tree SHA не найден в объекте commit. Данные: {obj_data}", file=sys.stderr)
+                    continue
+
+
+                dependencies[full_hash] = []
+
+                # Считываем дерево
+                tree_dir = os.path.join(objects_dir, tree_sha[:2])
+                tree_path = os.path.join(tree_dir, tree_sha[2:])
+                if not os.path.exists(tree_path):
+                    print(f"Пропуск дерева {tree_sha}: файл {tree_path} не найден.")
+                    continue
+
+                tree_data = read_object(tree_path).split(b'\x00', 1)[1]
+
+                # Извлекаем файлы из дерева
+                files = parse_tree(tree_data)
+                dependencies[full_hash].extend(files)
+                
     return dependencies
+
 
 
 def generate_mermaid_graph(dependencies):

@@ -1,28 +1,75 @@
+import os
+import tempfile
 import unittest
 import subprocess
+import shutil
 from unittest.mock import patch, MagicMock, ANY
 from script import get_git_dependencies, generate_mermaid_graph, visualize_graph
 
-
 class TestGitDependencies(unittest.TestCase):
-    @patch("subprocess.check_output")
-    def test_get_git_dependencies_success(self, mock_check_output):
-        """Тест успешного извлечения зависимостей."""
-        mock_check_output.return_value = "commit1\nfile1.txt\nfile2.txt\n\ncommit2\nfile3.txt\n"
-        repo_path = "/dummy/repo"
-        expected = {
-            "commit1": ["file1.txt", "file2.txt"],
-            "commit2": ["file3.txt"],
-        }
-        result = get_git_dependencies(repo_path)
-        self.assertEqual(result, expected)
 
-    @patch("subprocess.check_output", side_effect=subprocess.CalledProcessError(1, "git"))
-    def test_get_git_dependencies_error(self, mock_check_output):
-        """Тест обработки ошибки команды git."""
-        repo_path = "/dummy/repo"
-        with self.assertRaises(SystemExit):
-            get_git_dependencies(repo_path)
+    def setUp(self):
+        # Создаем временную директорию для репозитория
+        self.test_dir = tempfile.mkdtemp()
+        self.git_dir = os.path.join(self.test_dir, '.git')
+
+        # Инициализируем новый Git-репозиторий
+        subprocess.run(['git', 'init', self.test_dir], check=True)
+        os.chmod(self.git_dir, 0o755)
+
+        # Создаем несколько файлов и коммитов
+        self.create_file_and_commit("file1.txt", "Добавить file1")
+        self.create_file_and_commit("file2.txt", "Добавить file2")
+
+    def tearDown(self):
+        # Снимаем ограничения на доступ к файлам/папкам
+        for root, dirs, files in os.walk(self.test_dir, topdown=False):
+            for file in files:
+                file_path = os.path.join(root, file)
+                os.chmod(file_path, 0o777)  # Устанавливаем полный доступ
+            for dir in dirs:
+                dir_path = os.path.join(root, dir)
+                os.chmod(dir_path, 0o777)  # Устанавливаем полный доступ
+        os.chmod(self.test_dir, 0o777)  # Устанавливаем полный доступ для корневой директории
+
+        # Удаляем временную директорию
+        shutil.rmtree(self.test_dir)
+
+
+    def create_file_and_commit(self, filename, message):
+        # Создаем файл и добавляем его в Git
+        with open(os.path.join(self.test_dir, filename), 'w') as f:
+            f.write(f"Содержимое файла {filename}\n")
+
+        subprocess.run(['git', 'add', filename], cwd=self.test_dir, check=True)
+        subprocess.run(['git', 'commit', '-m', message], cwd=self.test_dir, check=True)
+
+    def test_get_git_dependencies(self):
+        # Вызываем функцию для анализа зависимостей
+        result = get_git_dependencies(self.test_dir)
+
+        # Извлекаем реальные коммиты и их файлы
+        commit_hashes = subprocess.check_output(
+            ["git", "log", "--format=%H"], cwd=self.test_dir
+        ).decode().strip().split("\n")
+        commit_hashes.reverse()  # Порядок должен соответствовать порядку добавления коммитов
+
+        # Ожидаемые зависимости
+        expected_result = {
+            commit_hashes[0]: ["file1.txt"],
+            commit_hashes[1]: ["file1.txt", "file2.txt"],
+        }
+
+        # Проверяем, что результат совпадает
+        self.assertEqual(result, expected_result)
+
+
+    @patch("os.path.isdir", side_effect=lambda path: False if ".git" in path else True)
+    @patch("os.listdir", return_value=["ab", "cd"])
+    def test_get_git_dependencies_error(self, mock_listdir, mock_isdir):
+        with self.assertRaises(ValueError):
+            get_git_dependencies(self.test_dir)
+
 
 
 class TestGenerateMermaidGraph(unittest.TestCase):
